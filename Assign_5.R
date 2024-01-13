@@ -1,0 +1,102 @@
+# Installing required packages
+install.packages(c("GEOdata", "cluster", "ggplot2", "ReactomePA", "fgsea" ))
+install.packages("tidyverse")
+install.packages("DESeq2")
+library(GEOquery)
+library(DESeq2)
+library(clusterProfiler)
+library(fgsea)
+
+library(igraph)
+library(diseaseEnhancer)
+
+#Download data of GSE33126
+geo_data <- getGEO(GEO = "GSE33126", GSEMatrix = TRUE)
+
+#Print the expression levels present in the data
+gene_exprs <- exprs(geo_data[[1]])
+View(gene_exprs)
+
+#Log-normalize the data
+exprs_norm <- log10(gene_exprs)+1
+
+#box-plot illustrating your the log-normalized data
+library(ggplot2)
+boxplot(exprs_norm,outline=FALSE)
+
+#the corresponding phenotype data and print it
+metadata <- pData(phenoData(geo_data[[1]]))
+library(tidyverse)
+metadata_modified <- metadata %>% 
+  select(8,11)%>%
+  rename_with(~ "group", 1) %>%
+  rename_with(~ "patient", 2)
+
+#Perform clustering between samples and display it as a heat map
+library(pheatmap)
+cluster_matrix = cor(exprs_norm)
+pheatmap(cluster_matrix)
+
+#heat map including annotations for the patient id as well as patient group
+pheatmap(cluster_matrix, annotation_col = metadata_modified)
+
+gene_pca <- prcomp(t(exprs_norm))
+
+# Plot the scatter plot with labels
+library(ggrepel)
+gene_pca.1 <- cbind(metadata_modified, gene_pca$x)
+ggplot(gene_pca.1,aes(x = PC1, y=PC2, col=group,label=paste("Patient", patient))) + geom_point()+geom_text_repel()
+
+# list of Differentially Expressed Genes (DEGs), print them, along with associated p-value and their adjusted p-value
+# Identify DEGs using limma
+library(limma)
+design <- model.matrix(~0+metadata_modified$group)
+design
+colnames(design) <- c("normal", 'tumor')
+fit <- lmFit(gene_exprs, design)
+contrast_matrix <- makeContrasts(normal - tumor, levels = design)
+fit_contrast <- contrasts.fit(fit, contrast_matrix)
+fit_ebayes <- eBayes(fit_contrast)
+DEGs <- topTable(fit_ebayes, coef = 1, number = Inf)
+
+# Print DEGs and associated p-values
+print(DEGs)
+
+# Create a volcano plot
+p_cutoff <- 0.05
+fc_cutoff <- 1
+full_results <- DEGs%>% 
+  mutate(Significant = adj.P.Val < p_cutoff, abs(logFC) > fc_cutoff ) %>% 
+  ggplot(aes(x = logFC, y = B, col=Significant)) + geom_point()
+print(full_results)
+
+# Create an MA plot
+ggplot(DEGs) +
+  geom_point(aes(x = log10(AveExpr), y = logFC)) +
+  theme_minimal()
+
+# Perform Reactome pathway analysis
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("reactome.db")
+library(ReactomePA)
+de_genes <- rownames(DEGs)
+enrich_result <- enrichPathway(de_genes, 'hsa', 'reactome')
+print(enrich_result)
+
+# Perform Gene Set Enrichment Analysis (GSEA)
+gene_sets <- read.gmt(system.file("extdata", "c2.cp.reactome.v7.4.symbols.gmt", package="clusterProfiler"))
+gsea_result <- fgsea(geneSets = gene_sets, stats = DEGs$logFC, nperm = 1000)
+print(gsea_result)
+
+# Visualize pathway as a network
+pathway_network <- enrich_result %>%
+  as.data.frame() %>%
+  select(-c('GeneRatio', 'BgRatio', 'qvalue', 'pvalue')) %>%
+  tidygraph::as_tbl_graph()
+plot(pathway_network, layout = 'fruchtermanreingold')
+
+# Perform Disease Gene Set Enrichment Analysis
+disease_result <- disease_enricher(DEGs$genes)
+
